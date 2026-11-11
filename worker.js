@@ -91,6 +91,32 @@ function queryWords(text) {
     .filter((w) => w.length > 1 && !STOPWORDS.has(w));
 }
 
+// کلمه‌های گفت‌وگوی معمولی که هرگز درخواست کتاب نیستند
+// (مثلاً «سپاسگزارم»، «سلام»، «باشه» — بات به این‌ها هیچ جوابی نمی‌دهد)
+const CHATTER_WORDS = new Set([
+  "سلام", "علیکم", "السلام", "مرسی", "ممنون", "ممنونم", "سپاس", "سپاسگزارم",
+  "سپاسگذارم", "سپاسگزار", "تشکر", "متشکرم", "خداحافظ", "خداحافظی", "بای",
+  "باشه", "باش", "اوکی", "اوک", "چشم", "حتما", "خوب", "خوبه", "خوبم", "عالی",
+  "عالیه", "دستت", "درد", "نکنه", "خسته", "نباشید", "وقت", "بخیر",
+  "صبح", "ظهر", "عصر", "شب", "بله", "آره", "نه", "خیر", "لطفا", "خواهش",
+  "تست", "چطوری", "چطورید", "خوبی", "خبر", "نیست", "هست", "هستش", "رفیق",
+  "داداش", "عزیز", "جان", "جون", "کسی", "میکنم", "می‌کنم", "خیلی",
+  "hi", "hello", "hey", "thanks", "thank", "you", "ok", "okay", "bye",
+  "good", "great", "nice", "test", "testing", "yes", "no", "please", "welcome",
+]);
+
+// آیا پیام فقط حرف معمولی است و درخواست کتاب نیست؟ (در این صورت سکوت کامل)
+function isChatter(text) {
+  const n = normalizeFa(text);
+  if (!n) return true; // فقط ایموجی یا علامت
+  if (n.length <= 2) return true;
+  if (/^[0-9\s]+$/.test(n)) return true; // فقط عدد
+  const words = n.split(" ").filter((w) => w.length > 0);
+  if (words.length === 0) return true;
+  // همه کلمه‌ها از جنس گفت‌وگوی معمولی‌اند
+  return words.every((w) => CHATTER_WORDS.has(w));
+}
+
 // نمره تطابق عنوان با پیام (۰ تا ۱)؛ فقط وقتی کافی است برمی‌گرداند
 function titleMatchScore(titleNorm, msgNorm) {
   const tWords = titleNorm.split(" ").filter((w) => w.length > 1);
@@ -710,6 +736,8 @@ async function handleUpdate(update, env) {
   // ۳) پیام متنی عادی در گروه: جستجوی خودکار — بدون نیاز به هیچ دستوری
   //     و بدون سقف طول پیام؛ تطابق عنوان خودش فیلتر است
   if (isGroup) {
+    // حرف معمولی («سپاسگزارم»، «سلام» و...) درخواست کتاب نیست: سکوت کامل
+    if (isChatter(text)) return;
     const chats = await orderedSearchChats(env, chatId);
     const found = await searchIndex(env, chats, text);
     if (found) {
@@ -730,6 +758,7 @@ async function handleUpdate(update, env) {
 
   // ۴) پیام متنی در چت خصوصی: جستجو در همه گروه‌ها و چنل‌هایی که بات می‌شناسد
   if (!isGroup) {
+    if (isChatter(text)) return;
     const chats = await getKnownChats(env);
     if (chats.length === 0) {
       await sendMessage(env, chatId, "هنوز گروه یا چنلی را نمی‌شناسم. اول بات را در گروه کتاب اضافه کن تا آرشیوش را ایندکس کند.");
