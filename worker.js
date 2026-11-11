@@ -92,7 +92,7 @@ function queryWords(text) {
 }
 
 // کلمه‌های گفت‌وگوی معمولی که هرگز درخواست کتاب نیستند
-// (مثلاً «سپاسگزارم»، «سلام»، «باشه» — بات به این‌ها هیچ جوابی نمی‌دهد)
+// (مثلاً «سپاسگزارم»، «سلام»، «باشه»)
 const CHATTER_WORDS = new Set([
   "سلام", "علیکم", "السلام", "مرسی", "ممنون", "ممنونم", "سپاس", "سپاسگزارم",
   "سپاسگذارم", "سپاسگزار", "تشکر", "متشکرم", "خداحافظ", "خداحافظی", "بای",
@@ -105,16 +105,31 @@ const CHATTER_WORDS = new Set([
   "good", "great", "nice", "test", "testing", "yes", "no", "please", "welcome",
 ]);
 
+// کلمه‌های غیرمحتوایی: گفت‌وگوی معمولی + کلمه‌های ربط و فعل‌های رایج
+// پیام فقط وقتی درخواست کتاب است که دست‌کم یک کلمه محتوایی داشته باشد.
+const FUNCTION_WORDS = new Set([
+  "از", "به", "با", "در", "که", "این", "آن", "او", "ما", "شما", "ایشان",
+  "تو", "هم", "بود", "شد", "شدم", "کن", "کنید", "بکن", "بکنید", "بده",
+  "بدید", "دوستان", "دوست", "لطفت", "لطفتون", "بابت", "همه", "چی",
+  "فرستاد", "فرستادی", "فرستادید", "فرستادم", "فرستادن", "فرستاده",
+  "فرستادین", "فرستادیم", "میکنه", "می‌کنه", "کرد", "کردم", "میکنی",
+  "میشه", "بگو", "بگید", "بگین", "بفرمایید", "بفرمائید",
+]);
+const NON_CONTENT = new Set([...STOPWORDS, ...CHATTER_WORDS, ...FUNCTION_WORDS]);
+
+// آیا پیام دست‌کم یک کلمه محتوایی (نام کتاب و...) دارد؟
+function hasContentWords(text) {
+  return normalizeFa(text)
+    .split(" ")
+    .some((w) => w.length > 1 && !NON_CONTENT.has(w));
+}
+
 // آیا پیام فقط حرف معمولی است و درخواست کتاب نیست؟ (در این صورت سکوت کامل)
 function isChatter(text) {
   const n = normalizeFa(text);
   if (!n) return true; // فقط ایموجی یا علامت
-  if (n.length <= 2) return true;
   if (/^[0-9\s]+$/.test(n)) return true; // فقط عدد
-  const words = n.split(" ").filter((w) => w.length > 0);
-  if (words.length === 0) return true;
-  // همه کلمه‌ها از جنس گفت‌وگوی معمولی‌اند
-  return words.every((w) => CHATTER_WORDS.has(w));
+  return !hasContentWords(text);
 }
 
 // نمره تطابق عنوان با پیام (۰ تا ۱)؛ فقط وقتی کافی است برمی‌گرداند
@@ -781,7 +796,7 @@ async function handleUpdate(update, env) {
 export default {
   async fetch(request, env, ctx) {
     if (request.method !== "POST") {
-      return new Response("📚 ربات درخواست کتاب — Worker فعال است. فقط تلگرام باید به این آدرس POST بفرستد.", {
+      return new Response("📚 ربات درخواست کتاب — Worker فعال است (نسخه ۴). فقط تلگرام باید به این آدرس POST بفرستد.", {
         status: 200,
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
