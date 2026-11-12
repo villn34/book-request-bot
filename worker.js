@@ -33,6 +33,8 @@
  *    read_only_index.py را در چت خصوصی بات می‌فرستد (یا /import را می‌زند)؛
  *    بات آن را وارد ایندکس می‌کند و فایل‌های قدیمی را با copyMessage می‌فرستد
  *    (بدون نیاز به file_id، بدون فوروارد، بدون نام منبع).
+ *  - خاموش/روشن (فقط صاحب بات): /off ربات را خاموش می‌کند (سکوت کامل؛ وب‌هوک،
+ *    ایندکس و توکن دست‌نخورده می‌مانند) و /on دوباره روشنش می‌کند.
  *    بقیه کاربرها فقط پیام عادی می‌نویسند و جواب می‌گیرند.
  *  - بات تحت هیچ شرایطی پیام حذف نمی‌کند؛ اصلاً چنین کدی در آن نیست.
  *  - منبعی درج نمی‌شود: وقتی فایل از گروه یا چنل دیگری می‌آید، بات
@@ -287,6 +289,15 @@ async function isOwnerStrict(env, userId) {
   const owner = await sGet(env, "owner");
   if (!owner) return false;
   return String(owner) === String(userId);
+}
+
+// وضعیت خاموش/روشن ربات (دستورهای /off و /on — فقط صاحب بات)
+async function isPaused(env) {
+  const v = await sGet(env, "paused");
+  return v === "1";
+}
+async function setPaused(env, paused) {
+  await sPut(env, "paused", paused ? "1" : "0");
 }
 
 /* ------------------------------------------------------------------ */
@@ -713,6 +724,30 @@ async function handleUpdate(update, env) {
     await sPut(env, "upd:" + update.update_id, "1", { expirationTtl: 300 });
   }
 
+  // خاموش/روشن ربات (دستورهای /off و /on — فقط صاحب بات).
+  // وقتی خاموش است، ربات هیچ پیام و فایلی را پردازش نمی‌کند (نه ایندکس، نه جواب)؛
+  // وب‌هوک، ایندکس و توکن دست‌نخورده می‌مانند و با /on دوباره روشن می‌شود.
+  const paused = await isPaused(env);
+  const _msg = update.message;
+  if (_msg && typeof _msg.text === "string" && !(_msg.from || {}).is_bot) {
+    const _cmd = _msg.text.trim().split(/\s+/)[0].replace(/@.*$/, "").toLowerCase();
+    if (_cmd === "/on" || _cmd === "/off") {
+      if (!(await isOwnerStrict(env, (_msg.from || {}).id))) {
+        await denyNotOwner(env, _msg.chat.id, _msg.message_id);
+        return;
+      }
+      if (_cmd === "/on") {
+        await setPaused(env, false);
+        await sendMessage(env, _msg.chat.id, "✅ ربات روشن شد.", _msg.message_id);
+      } else {
+        await setPaused(env, true);
+        await sendMessage(env, _msg.chat.id, "💤 ربات خاموش شد. برای روشن کردن دوباره /on را بفرست.", _msg.message_id);
+      }
+      return;
+    }
+  }
+  if (paused) return;
+
   // پست چنل: فقط فایل را ایندکس می‌کند؛ هرگز در چنل جواب نمی‌دهد
   if (update.channel_post) {
     const post = update.channel_post;
@@ -989,7 +1024,7 @@ async function handleUpdate(update, env) {
 export default {
   async fetch(request, env, ctx) {
     if (request.method !== "POST") {
-      return new Response("📚 ربات درخواست کتاب — Worker فعال است (نسخه ۸). فقط تلگرام باید به این آدرس POST بفرستد.", {
+      return new Response("📚 ربات درخواست کتاب — Worker فعال است (نسخه ۹). فقط تلگرام باید به این آدرس POST بفرستد.", {
         status: 200,
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
