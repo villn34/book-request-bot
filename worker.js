@@ -22,7 +22,10 @@
  *    هرگز لینک نمی‌فرستد؛ فقط اگر خود تلگرام قبول نکرد (ربات‌های تلگرام
  *    حداکثر ۵۰ مگابایت می‌توانند بفرستند) می‌گوید فایل خیلی بزرگ است.
  *    این سقف خود تلگرام است و هیچ باتی نمی‌تواند بیشتر کند.
- *  - دستورهای مدیریتی فقط از صاحب بات اجرا می‌شود (/add ،/del ،/requests ،/stats).
+ *  - دستورهای مدیریتی فقط از صاحب بات اجرا می‌شود (/add ،/del ،/requests ،/stats ،/get).
+ *  - /get <message_id> (فقط صاحب بات): تست می‌کند آیا ربات می‌تواند پیام‌های
+ *    قدیمی گروه را با copyMessage بفرستد — پایه ایندکس فقط-خواندنی آرشیو قدیمی
+ *    (بدون فوروارد و بدون نیاز به file_id).
  *    بقیه کاربرها فقط پیام عادی می‌نویسند و جواب می‌گیرند.
  *  - بات تحت هیچ شرایطی پیام حذف نمی‌کند؛ اصلاً چنین کدی در آن نیست.
  *  - منبعی درج نمی‌شود: وقتی فایل از گروه یا چنل دیگری می‌آید، بات
@@ -690,6 +693,42 @@ async function handleUpdate(update, env) {
       );
       return;
     }
+    // تست copyMessage برای پیام‌های قدیمی (فقط صاحب بات):
+    // /get <message_id> — پیام قدیمی را از همین گروه (یا در خصوصی، از اولین گروه شناخته‌شده) کپی می‌کند و همین‌جا می‌فرستد.
+    // اگر کار کرد، یعنی ربات می‌تواند فایل‌های قدیمی را بدون نیاز به file_id بفرستد
+    // (پایه راه‌حل ایندکس فقط-خواندنی آرشیو قدیمی: بدون فوروارد، بدون ریسک اکانت).
+    if (cmd === "/get" || cmd === "/copy") {
+      if (!(await isOwner(env, from.id))) {
+        await denyNotOwner(env, chatId, message.message_id);
+        return;
+      }
+      const mid = parseInt(arg, 10);
+      if (!mid || mid <= 0) {
+        await sendMessage(env, chatId, "آیدی پیام را هم بنویس. مثال:\n/get 721311", message.message_id);
+        return;
+      }
+      let fromChatId = chatId;
+      if (!isGroup) {
+        const chats = await getKnownChats(env);
+        if (chats.length === 0) {
+          await sendMessage(env, chatId, "هنوز گروهی را نمی‌شناسم.", message.message_id);
+          return;
+        }
+        fromChatId = chats[0];
+      }
+      const r = await tg(env, "copyMessage", {
+        chat_id: chatId,
+        from_chat_id: fromChatId,
+        message_id: mid,
+      });
+      if (r.data && r.data.ok) {
+        await sendMessage(env, chatId, "✅ کپی شد — پیام " + mid + " را می‌توانم بفرستم.", message.message_id);
+      } else {
+        const desc = (r.data && r.data.description) || ("خطای HTTP " + r.status);
+        await sendMessage(env, chatId, "⚠️ کپی نشد (پیام " + mid + "): " + desc, message.message_id);
+      }
+      return;
+    }
     if (cmd === "/requests") {
       if (!(await isOwner(env, from.id))) {
         await denyNotOwner(env, chatId, message.message_id);
@@ -780,7 +819,7 @@ async function handleUpdate(update, env) {
 export default {
   async fetch(request, env, ctx) {
     if (request.method !== "POST") {
-      return new Response("📚 ربات درخواست کتاب — Worker فعال است (نسخه ۵). فقط تلگرام باید به این آدرس POST بفرستد.", {
+      return new Response("📚 ربات درخواست کتاب — Worker فعال است (نسخه ۶). فقط تلگرام باید به این آدرس POST بفرستد.", {
         status: 200,
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
