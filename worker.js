@@ -26,6 +26,9 @@
  *  - /get <message_id> (فقط صاحب بات): تست می‌کند آیا ربات می‌تواند پیام‌های
  *    قدیمی گروه را با copyMessage بفرستد — پایه ایندکس فقط-خواندنی آرشیو قدیمی
  *    (بدون فوروارد و بدون نیاز به file_id).
+ *  - در گروه فقط به درخواست صریح کتاب جواب می‌دهد («کتاب ...»، «میخوام»، «دارید»،
+ *    «بفرستید»، «دانلود»، «لینک»، یا یک عنوان کوتاه خالص)؛ بحث و حرف معمولی
+ *    سکوت کامل می‌گیرد. برای هر درخواست فقط یک پیام می‌فرستد.
  *    بقیه کاربرها فقط پیام عادی می‌نویسند و جواب می‌گیرند.
  *  - بات تحت هیچ شرایطی پیام حذف نمی‌کند؛ اصلاً چنین کدی در آن نیست.
  *  - منبعی درج نمی‌شود: وقتی فایل از گروه یا چنل دیگری می‌آید، بات
@@ -74,6 +77,7 @@ function normalizeFa(text) {
     .replace(/[ً-ٰٖـ]/g, "") // اعراب و کشیدگی
     .replace(/‌/g, "") // نیم‌فاصله را حذف کن تا «می‌خوام» = «میخوام»
     .replace(/[«»"“”'']/g, " ")
+    .replace(/[؟،؛]/g, " ") // علامت سؤال و ویرگول عربی را هم حذف کن (در بازه عربی می‌مانند وگرنه به کلمه می‌چسبند)
     .replace(/[^0-9a-zA-Z\u0600-\u06FF\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
@@ -155,18 +159,29 @@ function titleMatchScore(titleNorm, msgNorm) {
   return scoreT >= 0.8 && hitT >= 2 ? scoreT : 0;
 }
 
-// آیا پیام شبیه درخواست کتاب است؟ (برای جستجوی وب وقتی در آرشیو نبود)
-function looksLikeRequest(text) {
+// آیا پیام در گروه صریحاً درخواست کتاب است؟ (فقط در این صورت ربات جواب می‌دهد)
+// قانون سخت‌گیرانه — فیلتر قبلی (hasContentWords) زیادی شل بود: هر جمله‌ای
+// که یک کلمه خارج از فهرست داشت «محتوایی» حساب می‌شد و ربات بهش واکنش نشان می‌داد.
+// حالا پیام فقط در این سه حالت درخواست کتاب است:
+//  ۱) «کتاب ...» در ابتدای پیام (مثل «کتاب تاریخ ایران»)
+//  ۲) یک کلمه درخواست داشته باشد (میخوام، دارید، بفرستید، دانلود، لینک و...)
+//  ۳) یک عنوان کوتاه و خالص باشد (۱ تا ۳ کلمه، همه محتوایی — مثل «تاوان» یا «تاریخ ایران»)
+// بحث، نظر و حرف معمولی — حتی اگر اسم کتاب توش باشد — درخواست نیست و سکوت کامل می‌گیرد.
+const REQUEST_MARKERS = new Set([
+  "میخوام", "میخواهم", "میخواستم", "دارید", "دارین", "داری", "داره",
+  "بفرست", "بفرستید", "بفرستین", "دانلود", "لینک", "لینکش",
+  "بذار", "بذارید", "بذارین", "پیدا",
+]);
+function isBookRequest(text) {
   const n = normalizeFa(text);
-  return (
-    n.startsWith("کتاب ") ||
-    n.includes(" میخوام") ||
-    n.includes(" میخواهم") ||
-    n.includes(" دارید") ||
-    n.includes(" دانلود") ||
-    n.includes(" لطفا") ||
-    n.includes("لطفا ")
-  );
+  const words = n.split(" ").filter((w) => w.length > 0);
+  if (words.length === 0) return false;
+  // «کتاب ...» در ابتدای پیام — به شرطی که بعدش دست‌کم یک کلمه محتوایی باشد
+  // (تا «کتاب خوب» که عنوان قابل‌جستجو ندارد، درخواست حساب نشود)
+  if (n.startsWith("کتاب ") && hasContentWords(n.slice("کتاب ".length))) return true;
+  if (words.some((w) => REQUEST_MARKERS.has(w))) return true;
+  if (words.length <= 3 && words.every((w) => w.length > 1 && !NON_CONTENT.has(w))) return true;
+  return false;
 }
 
 /* ------------------------------------------------------------------ */
@@ -553,7 +568,7 @@ async function doSearch(env, searchChatIds, replyChatId, logChatId, query, reply
     return;
   }
   // هیچ‌جا نبود → جستجوی نسخه رایگان قانونی (بدون نام بردن از منبع)
-  await sendMessage(env, replyChatId, "🔎 «" + query + "» پیدا نشد؛ دارم جاهای دیگر را هم می‌گردم…", replyTo);
+  // بدون پیام واسطه («دارم می‌گردم») تا برای هر درخواست فقط یک پیام برود
   const free = await searchFreeCopy(query);
   if (!free) {
     await sendMessage(
@@ -771,24 +786,19 @@ async function handleUpdate(update, env) {
     return; // دستور ناشناخته
   }
 
-  // ۳) پیام متنی عادی در گروه: جستجوی خودکار — بدون نیاز به هیچ دستوری
-  //     و بدون سقف طول پیام؛ تطابق عنوان خودش فیلتر است
+  // ۳) پیام متنی عادی در گروه: فقط وقتی صریحاً درخواست کتاب است جواب بده؛
+  //     بقیه پیام‌ها (حرف معمولی، بحث، نظر — حتی اگر اسم کتاب توش باشد) سکوت کامل.
+  //     برای هر درخواست هم فقط یک پیام می‌فرستد (فایل، یا «پیدا نشد»).
   if (isGroup) {
-    // حرف معمولی («سپاسگزارم»، «سلام» و...) درخواست کتاب نیست: سکوت کامل
-    if (isChatter(text)) return;
+    if (!isBookRequest(text)) return;
     const chats = await orderedSearchChats(env, chatId);
     const found = await searchIndex(env, chats, text);
     if (found) {
       await sendIndexedFile(env, chatId, found, message.message_id);
       return;
     }
-    // در آرشیو نبود: اگر پیام صریحاً درخواست کتاب است، یا پیام کوتاه
-    // و عنوان‌مانند است (مثلاً فقط «تاوان»)، در آرشیوهای رایگان بگرد
-    // و اگر نبود درخواست را ثبت کن. چت معمولی گروه نادیده گرفته می‌شود.
-    const rawWords = text.trim().split(/\s+/).length;
-    const qWords = queryWords(text);
-    const q = qWords.join(" ");
-    if (q && (looksLikeRequest(text) || (rawWords <= 3 && qWords.length <= 3))) {
+    const q = queryWords(text).join(" ");
+    if (q) {
       await doSearch(env, chats, chatId, chatId, q, message.message_id, from);
     }
     return;
@@ -819,7 +829,7 @@ async function handleUpdate(update, env) {
 export default {
   async fetch(request, env, ctx) {
     if (request.method !== "POST") {
-      return new Response("📚 ربات درخواست کتاب — Worker فعال است (نسخه ۶). فقط تلگرام باید به این آدرس POST بفرستد.", {
+      return new Response("📚 ربات درخواست کتاب — Worker فعال است (نسخه ۷). فقط تلگرام باید به این آدرس POST بفرستد.", {
         status: 200,
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
