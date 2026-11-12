@@ -29,6 +29,10 @@
  *  - در گروه فقط به درخواست صریح کتاب جواب می‌دهد («کتاب ...»، «میخوام»، «دارید»،
  *    «بفرستید»، «دانلود»، «لینک»، یا یک عنوان کوتاه خالص)؛ بحث و حرف معمولی
  *    سکوت کامل می‌گیرد. برای هر درخواست فقط یک پیام می‌فرستد.
+ *  - ایندکس آرشیو قدیمی (فقط-خواندنی): صاحب بات فایل JSON ساخته‌شده با اسکریپت
+ *    read_only_index.py را در چت خصوصی بات می‌فرستد (یا /import را می‌زند)؛
+ *    بات آن را وارد ایندکس می‌کند و فایل‌های قدیمی را با copyMessage می‌فرستد
+ *    (بدون نیاز به file_id، بدون فوروارد، بدون نام منبع).
  *    بقیه کاربرها فقط پیام عادی می‌نویسند و جواب می‌گیرند.
  *  - بات تحت هیچ شرایطی پیام حذف نمی‌کند؛ اصلاً چنین کدی در آن نیست.
  *  - منبعی درج نمی‌شود: وقتی فایل از گروه یا چنل دیگری می‌آید، بات
@@ -275,6 +279,16 @@ async function isOwner(env, userId) {
   return String(owner) === String(userId);
 }
 
+// بررسی مالکیت بدون اینکه اولین نفر را صاحب کند (برای ایمپورت فایل — امن‌تر)
+async function isOwnerStrict(env, userId) {
+  if (env.ADMIN_USER_ID && String(env.ADMIN_USER_ID).trim()) {
+    return String(env.ADMIN_USER_ID).trim() === String(userId);
+  }
+  const owner = await sGet(env, "owner");
+  if (!owner) return false;
+  return String(owner) === String(userId);
+}
+
 /* ------------------------------------------------------------------ */
 /* تلگرام — بات فقط پیام می‌فرستد؛ هرگز پیام حذف نمی‌کند              */
 /* ------------------------------------------------------------------ */
@@ -317,9 +331,26 @@ async function sendAudio(env, chatId, audio, caption, replyTo) {
 }
 
 // ارسال فایل ایندکس‌شده — فقط خود فایل، بدون لینک و بدون نام منبع.
+// ورودی آرشیو قدیمی (copy: true) با copyMessage از پیام اصلی کپی می‌شود
+// (بدون نیاز به file_id)؛ خروجی‌اش یک کپی تمیز است، بدون نام منبع.
 // اگر تلگرام قبول نکرد (فایل خیلی بزرگ است)، فقط همین را می‌گوید.
 async function sendIndexedFile(env, replyChatId, entry, replyTo) {
   const caption = "📚 " + entry.title;
+  if (entry.copy) {
+    const fromChatId = entry.groupId || entry.chat_id;
+    const r = await tg(env, "copyMessage", {
+      chat_id: replyChatId,
+      from_chat_id: fromChatId,
+      message_id: entry.message_id,
+    });
+    if (r.data && r.data.ok) return true;
+    await sendMessage(
+      env, replyChatId,
+      "📚 " + entry.title + "\n\nاین فایل در آرشیو قدیمی است، اما تلگرام اجازه کپی‌اش را نداد.",
+      replyTo
+    );
+    return false;
+  }
   let r;
   if (entry.kind === "audio") {
     r = await sendAudio(env, replyChatId, entry.file_id, caption, replyTo);
@@ -395,12 +426,74 @@ async function indexFile(env, chatId, message, titleOverride) {
   return true;
 }
 
-async function removeFromIndex(env, chatId, fileId) {
+async function removeFromIndex(env, chatId, target) {
   const index = await getIndex(env, chatId);
-  const next = index.filter((e) => e.file_id !== fileId);
-  if (next.length === index.length) return null;
+  let removed = null;
+  const next = index.filter((e) => {
+    const same = target.file_id
+      ? e.file_id === target.file_id
+      : target.copy && e.copy && e.message_id === target.message_id;
+    if (same) removed = e;
+    return !same;
+  });
+  if (!removed) return null;
   await saveIndex(env, chatId, next);
-  return index.find((e) => e.file_id === fileId);
+  return removed;
+}
+
+// دانلود فایل تلگرام (برای فایل JSON ایندکس) — حداکثر ۲۰ مگابایت
+async function downloadTelegramFile(env, fileId) {
+  const r = await tg(env, "getFile", { file_id: fileId });
+  const path = r.data && r.data.ok && r.data.result && r.data.result.file_path;
+  if (!path) return null;
+  const res = await fetch("https://api.telegram.org/file/bot" + env.TELEGRAM_BOT_TOKEN + "/" + path);
+  if (!res.ok) return null;
+  return await res.text();
+}
+
+// وارد کردن ایندکس فقط-خواندنی آرشیو قدیمی — فایل JSON ساخته‌شده با اسکریپت read_only_index.py
+// ورودی: آرایه‌ای از {title, message_id, chat_id, kind?} یا شیء {books:[...]} با chat_id اختیاری.
+// تکراری (بر اساس message_id) و خراب‌ها رد می‌شوند. برمی‌گرداند {ok, imported, skipped, invalid}.
+const IMPORT_MAX_ENTRIES = 5000;
+async function importOldIndex(env, data) {
+  let items = null;
+  if (Array.isArray(data)) items = data;
+  else if (data && typeof data === "object") items = data.books || data.entries || null;
+  if (!items || !Array.isArray(items)) return { ok: false, error: "format" };
+  if (items.length > IMPORT_MAX_ENTRIES) return { ok: false, error: "too_big", count: items.length };
+  const topChatId = data && !Array.isArray(data) ? data.chat_id : undefined;
+  let imported = 0, skipped = 0, invalid = 0;
+  const byChat = new Map(); // chatId -> Map(message_id -> entry)
+  for (const it of items) {
+    if (!it || typeof it !== "object") { invalid++; continue; }
+    const title = (it.title || "").trim();
+    const mid = parseInt(it.message_id, 10);
+    const rawChat = it.chat_id !== undefined && it.chat_id !== null ? it.chat_id : topChatId;
+    const chatId = rawChat !== undefined && rawChat !== null ? String(rawChat) : null;
+    if (!title || !mid || mid <= 0 || !chatId) { invalid++; continue; }
+    const norm = normalizeFa(title);
+    if (!norm) { invalid++; continue; }
+    let chatMap = byChat.get(chatId);
+    if (!chatMap) { chatMap = new Map(); byChat.set(chatId, chatMap); }
+    if (chatMap.has(mid)) { skipped++; continue; }
+    chatMap.set(mid, {
+      title, norm, copy: true, message_id: mid, chat_id: chatId,
+      kind: it.kind === "audio" ? "audio" : "pdf", date: Date.now(),
+    });
+  }
+  for (const [chatId, chatMap] of byChat) {
+    const index = await getIndex(env, chatId);
+    const have = new Set(index.filter((e) => e.message_id).map((e) => e.message_id));
+    const fresh = [...chatMap.values()].filter((e) => !have.has(e.message_id));
+    skipped += chatMap.size - fresh.length;
+    if (fresh.length > 0) {
+      index.push(...fresh);
+      await saveIndex(env, chatId, index);
+      await markChatKnown(env, chatId);
+      imported += fresh.length;
+    }
+  }
+  return { ok: true, imported, skipped, invalid };
 }
 
 // بهترین تطابق در همه چت‌های شناخته‌شده؛ گروه فعلی اولویت دارد
@@ -644,6 +737,49 @@ async function handleUpdate(update, env) {
     return;
   }
 
+  // ۱-ب) فایل JSON ایندکس آرشیو قدیمی — فقط در چت خصوصی و فقط از صاحب بات.
+  //      صاحب فایل خروجی اسکریپت (book-index-*.json) را همین‌جا می‌فرستد و بات آن را وارد ایندکس می‌کند.
+  if (!isGroup && message.document) {
+    const doc = message.document;
+    const name = (doc.file_name || "").toLowerCase();
+    if (name.endsWith(".json")) {
+      if (!(await isOwnerStrict(env, from.id))) {
+        await sendMessage(env, chatId, "⛔ فقط صاحب بات می‌تواند ایندکس وارد کند. اول در خصوصی /start بزن.");
+        return;
+      }
+      const content = await downloadTelegramFile(env, doc.file_id);
+      if (content === null) {
+        await sendMessage(env, chatId, "⚠️ نتوانستم فایل را دانلود کنم. دوباره بفرست.");
+        return;
+      }
+      let data = null;
+      try { data = JSON.parse(content); } catch (e) { data = null; }
+      if (!data) {
+        await sendMessage(env, chatId, "⚠️ این فایل JSON معتبر نیست. فایل خروجی اسکریپت (book-index-*.json) را بفرست.");
+        return;
+      }
+      const result = await importOldIndex(env, data);
+      if (!result.ok) {
+        if (result.error === "too_big") {
+          await sendMessage(env, chatId, "⚠️ فایل خیلی بزرگ است (" + result.count + " کتاب). هر فایل حداکثر ۵٬۰۰۰ کتاب. اسکریپت فایل‌ها را خودش به چند قسمت تقسیم می‌کند؛ هر قسمت را جدا بفرست.");
+        } else {
+          await sendMessage(env, chatId, "⚠️ قالب فایل درست نیست. فایل باید آرایه‌ای از {title, message_id, chat_id} باشد. فایل خروجی اسکریپت را بفرست.");
+        }
+        return;
+      }
+      await sendMessage(
+        env, chatId,
+        "✅ ایندکس آرشیو قدیمی وارد شد:\n" +
+          "• " + result.imported + " کتاب جدید اضافه شد\n" +
+          "• " + result.skipped + " تکراری (قبلاً بود) رد شد\n" +
+          "• " + result.invalid + " مورد خراب نادیده گرفته شد\n" +
+          "حالا در گروه، درخواست آن کتاب‌ها هم با کپی فایل قدیمی جواب داده می‌شود. با /stats تعداد را ببین."
+      );
+      return;
+    }
+    return; // بقیه فایل‌های خصوصی نادیده گرفته می‌شوند
+  }
+
   if (!text) return;
 
   // ۲) دستورها
@@ -696,10 +832,10 @@ async function handleUpdate(update, env) {
       let removed = null;
       if (replied && isBookFile(replied)) {
         const fileId = (replied.document || replied.audio || replied.voice || {}).file_id;
-        if (fileId) removed = await removeFromIndex(env, chatId, fileId);
+        if (fileId) removed = await removeFromIndex(env, chatId, { file_id: fileId });
       } else if (arg) {
         const found = await searchIndex(env, [chatId], arg);
-        if (found) removed = await removeFromIndex(env, chatId, found.file_id);
+        if (found) removed = await removeFromIndex(env, chatId, found);
       }
       await sendMessage(
         env, chatId,
@@ -744,6 +880,27 @@ async function handleUpdate(update, env) {
       }
       return;
     }
+    // راهنمای وارد کردن ایندکس آرشیو قدیمی (فقط صاحب بات)
+    if (cmd === "/import") {
+      if (!(await isOwner(env, from.id))) {
+        await denyNotOwner(env, chatId, message.message_id);
+        return;
+      }
+      if (isGroup) {
+        await sendMessage(env, chatId, "فایل JSON ایندکس را در چت خصوصی بات بفرست، نه در گروه.", message.message_id);
+        return;
+      }
+      await sendMessage(
+        env, chatId,
+        "📥 وارد کردن ایندکس آرشیو قدیمی:\n" +
+          "فایل JSON ساخته‌شده با اسکریپت (book-index-*.json) را همین‌جا بفرست.\n" +
+          "قالب هر مورد: {\"title\": \"نام کتاب\", \"message_id\": 123, \"chat_id\": -100...}\n" +
+          "هر فایل حداکثر ۵٬۰۰۰ کتاب؛ اگر بیشتر شد، قسمت‌های بعدی را جدا بفرست.\n" +
+          "کپی فقط از گروه‌هایی کار می‌کند که بات در آن‌ها عضو است.",
+        message.message_id
+      );
+      return;
+    }
     if (cmd === "/requests") {
       if (!(await isOwner(env, from.id))) {
         await denyNotOwner(env, chatId, message.message_id);
@@ -767,19 +924,22 @@ async function handleUpdate(update, env) {
       let total = 0;
       let totalPdf = 0;
       let totalAudio = 0;
+      let totalCopy = 0;
       const chats = await getKnownChats(env);
       for (const id of chats) {
         const idx = await getIndex(env, id);
         total += idx.length;
         totalPdf += idx.filter((e) => e.kind === "pdf").length;
         totalAudio += idx.filter((e) => e.kind === "audio").length;
+        totalCopy += idx.filter((e) => e.copy).length;
       }
       const here = await getIndex(env, chatId);
       await sendMessage(
         env, chatId,
         "📊 کتاب‌های ایندکس‌شده:\n" +
           "• این گروه: " + here.length + "\n" +
-          "• همه منابع با هم: " + total + " (📕 PDF: " + totalPdf + " ، 🎧 صوتی: " + totalAudio + ")"
+          "• همه منابع با هم: " + total + " (📕 PDF: " + totalPdf + " ، 🎧 صوتی: " + totalAudio + ")\n" +
+          "• آرشیو قدیمی (کپی): " + totalCopy
       );
       return;
     }
@@ -829,7 +989,7 @@ async function handleUpdate(update, env) {
 export default {
   async fetch(request, env, ctx) {
     if (request.method !== "POST") {
-      return new Response("📚 ربات درخواست کتاب — Worker فعال است (نسخه ۷). فقط تلگرام باید به این آدرس POST بفرستد.", {
+      return new Response("📚 ربات درخواست کتاب — Worker فعال است (نسخه ۸). فقط تلگرام باید به این آدرس POST بفرستد.", {
         status: 200,
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
