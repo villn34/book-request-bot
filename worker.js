@@ -18,10 +18,10 @@
  * قوانین این نسخه (به خواست صاحب بات):
  *  - تعداد پاسخ نامحدود است: به هر درخواستی جواب می‌دهد؛ درخواست‌های
  *    ثبت‌شده هم سقف ندارند.
- *  - حجم فایل از طرف بات سقفی ندارد: بات همیشه اول خود فایل را می‌فرستد؛
- *    فقط اگر خود تلگرام قبول نکرد (ربات‌های تلگرام حداکثر ۵۰ مگابایت
- *    می‌توانند بفرستند و از راه لینک ۲۰ مگابایت) لینک دانلود یا لینک پیام
- *    اصلی را می‌فرستد. این سقف خود تلگرام است و هیچ باتی نمی‌تواند بیشتر کند.
+ *  - حجم فایل از طرف بات سقفی ندارد: بات همیشه اول خود فایل را می‌فرستد و
+ *    هرگز لینک نمی‌فرستد؛ فقط اگر خود تلگرام قبول نکرد (ربات‌های تلگرام
+ *    حداکثر ۵۰ مگابایت می‌توانند بفرستند) می‌گوید فایل خیلی بزرگ است.
+ *    این سقف خود تلگرام است و هیچ باتی نمی‌تواند بیشتر کند.
  *  - دستورهای مدیریتی فقط از صاحب بات اجرا می‌شود (/add ،/del ،/requests ،/stats).
  *    بقیه کاربرها فقط پیام عادی می‌نویسند و جواب می‌گیرند.
  *  - بات تحت هیچ شرایطی پیام حذف نمی‌کند؛ اصلاً چنین کدی در آن نیست.
@@ -298,15 +298,8 @@ async function sendAudio(env, chatId, audio, caption, replyTo) {
   return tg(env, "sendAudio", body);
 }
 
-// لینک پیام اصلی در سوپرگروه/چنل (برای وقتی فایل خیلی بزرگ است)
-function messageLink(chatId, messageId) {
-  const s = String(chatId);
-  if (s.startsWith("-100")) return "https://t.me/c/" + s.slice(4) + "/" + messageId;
-  return null;
-}
-
-// ارسال فایل ایندکس‌شده؛ اگر تلگرام قبول نکرد، لینک پیام اصلی را می‌فرستد
-// (بدون هیچ اشاره‌ای به اینکه فایل از کجا آمده است)
+// ارسال فایل ایندکس‌شده — فقط خود فایل، بدون لینک و بدون نام منبع.
+// اگر تلگرام قبول نکرد (فایل خیلی بزرگ است)، فقط همین را می‌گوید.
 async function sendIndexedFile(env, replyChatId, entry, replyTo) {
   const caption = "📚 " + entry.title;
   let r;
@@ -316,20 +309,11 @@ async function sendIndexedFile(env, replyChatId, entry, replyTo) {
     r = await sendDocument(env, replyChatId, entry.file_id, caption, replyTo);
   }
   if (r.data && r.data.ok) return true;
-  const link = messageLink(entry.groupId, entry.message_id);
-  if (link) {
-    await sendMessage(
-      env, replyChatId,
-      "📚 " + entry.title + "\n\nاین فایل برای ارسال دوباره با بات خیلی بزرگ است — پیام اصلی اینجاست:\n" + link,
-      replyTo
-    );
-  } else {
-    await sendMessage(
-      env, replyChatId,
-      "📚 " + entry.title + "\n\nاین فایل خیلی بزرگ است و تلگرام اجازه نمی‌دهد بات دوباره بفرستد.",
-      replyTo
-    );
-  }
+  await sendMessage(
+    env, replyChatId,
+    "📚 " + entry.title + "\n\nاین فایل خیلی بزرگ است و تلگرام اجازه نمی‌دهد بات دوباره بفرستد.",
+    replyTo
+  );
   return false;
 }
 
@@ -796,7 +780,7 @@ async function handleUpdate(update, env) {
 export default {
   async fetch(request, env, ctx) {
     if (request.method !== "POST") {
-      return new Response("📚 ربات درخواست کتاب — Worker فعال است (نسخه ۴). فقط تلگرام باید به این آدرس POST بفرستد.", {
+      return new Response("📚 ربات درخواست کتاب — Worker فعال است (نسخه ۵). فقط تلگرام باید به این آدرس POST بفرستد.", {
         status: 200,
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
