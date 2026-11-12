@@ -35,6 +35,8 @@
  *    (بدون نیاز به file_id، بدون فوروارد، بدون نام منبع).
  *  - خاموش/روشن (فقط صاحب بات): /off ربات را خاموش می‌کند (سکوت کامل؛ وب‌هوک،
  *    ایندکس و توکن دست‌نخورده می‌مانند) و /on دوباره روشنش می‌کند.
+ *  - راهنما مخفی است: /start و /help فقط برای صاحب بات جواب می‌دهند؛ برای
+ *    کاربران عادی ربات کاملاً سکوت می‌کند تا دستورها دیده نشوند.
  *    بقیه کاربرها فقط پیام عادی می‌نویسند و جواب می‌گیرند.
  *  - بات تحت هیچ شرایطی پیام حذف نمی‌کند؛ اصلاً چنین کدی در آن نیست.
  *  - منبعی درج نمی‌شود: وقتی فایل از گروه یا چنل دیگری می‌آید، بات
@@ -825,7 +827,12 @@ async function handleUpdate(update, env) {
     const arg = parts.slice(1).join(" ").trim();
 
     if (cmd === "/start" || cmd === "/help") {
-      if (!isGroup) await isOwner(env, from.id); // قفل صاحب در خصوصی
+      // راهنما فقط برای صاحب بات است؛ برای کاربران عادی کاملاً سکوت می‌کند
+      // تا دستورها دیده نشوند.
+      const owner = !isGroup
+        ? await isOwner(env, from.id) // در خصوصی: قفل صاحب (اولین نفر صاحب می‌شود)
+        : await isOwnerStrict(env, from.id); // در گروه: فقط صاحب فعلی
+      if (!owner) return;
       await sendMessage(env, chatId, startText());
       return;
     }
@@ -1024,7 +1031,7 @@ async function handleUpdate(update, env) {
 export default {
   async fetch(request, env, ctx) {
     if (request.method !== "POST") {
-      return new Response("📚 ربات درخواست کتاب — Worker فعال است (نسخه ۹). فقط تلگرام باید به این آدرس POST بفرستد.", {
+      return new Response("📚 ربات درخواست کتاب — Worker فعال است (نسخه ۱۰). فقط تلگرام باید به این آدرس POST بفرستد.", {
         status: 200,
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
