@@ -152,6 +152,9 @@ function titleMatchScore(titleNorm, msgNorm) {
   const tWords = titleNorm.split(" ").filter((w) => w.length > 1);
   const mWords = msgNorm.split(" ").filter((w) => w.length > 1);
   if (tWords.length === 0 || mWords.length === 0) return 0;
+  // عنوان‌های کلی و بی‌محتوا (مثلاً فقط «کتاب») هرگز تطابق ندارند —
+  // وگرنه هر جستجو اولین فایل با چنین عنوانی را برمی‌گرداند.
+  if (!tWords.some((w) => !NON_CONTENT.has(w))) return 0;
   if (msgNorm.includes(titleNorm)) return 1;
   const mSet = new Set(mWords);
   const tSet = new Set(tWords);
@@ -383,9 +386,9 @@ async function sendIndexedFile(env, replyChatId, entry, replyTo) {
 /* ایندکس کتاب‌ها (گروه و چنل)                                         */
 /* ------------------------------------------------------------------ */
 function fileTitleFromMessage(message) {
-  // عنوان را از کپشن می‌خوانیم، وگرنه از نام فایل
+  // عنوان را از کل کپشن می‌خوانیم (نه فقط خط اول — خیلی از کپشن‌ها خط اولشان فقط «کتاب» است)، وگرنه از نام فایل
   const caption = (message.caption || "").trim();
-  if (caption) return caption.split("\n")[0].trim();
+  if (caption) return caption.split("\n").map((s) => s.trim()).filter(Boolean).join(" ").slice(0, 200);
   const doc = message.document || message.audio;
   if (doc && doc.file_name) {
     return doc.file_name
@@ -475,7 +478,7 @@ async function importOldIndex(env, data) {
   if (!items || !Array.isArray(items)) return { ok: false, error: "format" };
   if (items.length > IMPORT_MAX_ENTRIES) return { ok: false, error: "too_big", count: items.length };
   const topChatId = data && !Array.isArray(data) ? data.chat_id : undefined;
-  let imported = 0, skipped = 0, invalid = 0;
+  let imported = 0, skipped = 0, invalid = 0, updated = 0;
   const byChat = new Map(); // chatId -> Map(message_id -> entry)
   for (const it of items) {
     if (!it || typeof it !== "object") { invalid++; continue; }
@@ -497,16 +500,25 @@ async function importOldIndex(env, data) {
   for (const [chatId, chatMap] of byChat) {
     const index = await getIndex(env, chatId);
     const have = new Set(index.filter((e) => e.message_id).map((e) => e.message_id));
-    const fresh = [...chatMap.values()].filter((e) => !have.has(e.message_id));
-    skipped += chatMap.size - fresh.length;
-    if (fresh.length > 0) {
+    const fresh = [];
+    for (const e of chatMap.values()) {
+      const old = index.find((x) => x.message_id === e.message_id);
+      if (old) {
+        // عنوان اصلاح‌شده را جایگزین کن (فایل‌هایی که قبلاً با عنوان کلی «کتاب» وارد شده‌اند)
+        if (old.title !== e.title || old.norm !== e.norm) {
+          old.title = e.title; old.norm = e.norm; old.kind = e.kind; updated++;
+        }
+        skipped++;
+      } else fresh.push(e);
+    }
+    if (fresh.length > 0 || updated > 0) {
       index.push(...fresh);
       await saveIndex(env, chatId, index);
       await markChatKnown(env, chatId);
       imported += fresh.length;
     }
   }
-  return { ok: true, imported, skipped, invalid };
+  return { ok: true, imported, skipped, invalid, updated };
 }
 
 // بهترین تطابق در همه چت‌های شناخته‌شده؛ گروه فعلی اولویت دارد
@@ -808,6 +820,7 @@ async function handleUpdate(update, env) {
         env, chatId,
         "✅ ایندکس آرشیو قدیمی وارد شد:\n" +
           "• " + result.imported + " کتاب جدید اضافه شد\n" +
+          (result.updated ? "• " + result.updated + " عنوان اصلاح شد\n" : "") +
           "• " + result.skipped + " تکراری (قبلاً بود) رد شد\n" +
           "• " + result.invalid + " مورد خراب نادیده گرفته شد\n" +
           "حالا در گروه، درخواست آن کتاب‌ها هم با کپی فایل قدیمی جواب داده می‌شود. با /stats تعداد را ببین."
@@ -1031,7 +1044,7 @@ async function handleUpdate(update, env) {
 export default {
   async fetch(request, env, ctx) {
     if (request.method !== "POST") {
-      return new Response("📚 ربات درخواست کتاب — Worker فعال است (نسخه ۱۰). فقط تلگرام باید به این آدرس POST بفرستد.", {
+      return new Response("📚 ربات درخواست کتاب — Worker فعال است (نسخه ۱۱). فقط تلگرام باید به این آدرس POST بفرستد.", {
         status: 200,
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
