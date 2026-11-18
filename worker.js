@@ -358,6 +358,7 @@ async function sendIndexedFile(env, replyChatId, entry, replyTo) {
       chat_id: replyChatId,
       from_chat_id: fromChatId,
       message_id: entry.message_id,
+      reply_to_message_id: replyTo,
     });
     if (r.data && r.data.ok) return true;
     await sendMessage(
@@ -1044,7 +1045,7 @@ async function handleUpdate(update, env) {
 export default {
   async fetch(request, env, ctx) {
     if (request.method !== "POST") {
-      return new Response("📚 ربات درخواست کتاب — Worker فعال است (نسخه ۱۱). فقط تلگرام باید به این آدرس POST بفرستد.", {
+      return new Response("📚 ربات درخواست کتاب — Worker فعال است (نسخه ۱۲). فقط تلگرام باید به این آدرس POST بفرستد.", {
         status: 200,
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
