@@ -1,0 +1,20 @@
+# wrangler برای نسخه ۱۳ ربات درخواست کتاب (D1 به‌جای KV)
+# نحوه استفاده: بعد از اینکه دیتابیس D1 را در داشبورد Cloudflare ساختی،
+# آیدی آن را جای PASTE-YOUR-D1-DATABASE-ID-HERE بگذار.
+# موقع استقرار، این فایل را به wrangler.toml تغییر نام بده و
+# worker-v13.js را به worker.js تغییر نام بده — یا در گیت‌هاب همان‌طور
+# که هست پوش کن (main پایین را ببین).
+# توجه: تا وقتی D1 ساخته و وصل نشده، نسخه ۱۳ را مستقر نکن؛
+# ورکر بدون binding دیتابیس همه آپدیت‌ها را رد می‌کند و ایندکس KV نسخه ۱۲ هم به D1 منتقل نمی‌شود.
+
+name = "book-request-bot"
+main = "worker-v13.js"
+compatibility_date = "2026-11-20"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "book-bot-db"
+database_id = "PASTE-YOUR-D1-DATABASE-ID-HERE"
+
+[triggers]
+crons = ["* * * * *"]
